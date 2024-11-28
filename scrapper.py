@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 import logging
+import random
 import threading
 
 class ParallelWebScraper:
@@ -13,15 +14,24 @@ class ParallelWebScraper:
         self.timeout = timeout
         self.max_retries = max_retries
         self.session = requests.Session()
+        self.session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
         self.lock = threading.Lock()
         self.scraped_urls = set()
         self.external_links = set()
         self.to_scrape = deque()
         self.processing = set()
         self.white_list_domains = set()
+        self.delay_min = 0.5
+        self.delay_max = 1.0
+
+    def is_subdomain(self, candidate, main_domain):
+        candidate_parts = candidate.split('.')
+        main_parts = main_domain.split('.')
+        if len(candidate_parts) < len(main_parts):
+            return False
+        return candidate_parts[-len(main_parts):] == main_parts
 
     def is_valid_url(self, url):
-        """Check if url is valid."""
         try:
             parsed = urlparse(url)
             return bool(parsed.netloc) and bool(parsed.scheme)
@@ -29,20 +39,24 @@ class ParallelWebScraper:
             return False
 
     def get_domain_name(self, url):
-        """Extract domain name from the given URL."""
-        return urlparse(url).netloc
+        return urlparse(url).netloc.lower()
 
     def get_all_links(self, url):
-        """Extract all links from the given URL with retry mechanism."""
         for attempt in range(self.max_retries + 1):
             try:
                 response = self.session.get(url, timeout=self.timeout)
                 response.raise_for_status()
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'text/html' not in content_type:
+                    logging.info(f"Skipping non-HTML content: {url}")
+                    return []
                 response.encoding = 'utf-8'
                 soup = BeautifulSoup(response.text, 'html.parser')
-                return [urljoin(url, link.get('href')) 
-                        for link in soup.find_all('a') 
-                        if link.get('href')]
+                links = [urljoin(url, link.get('href')) 
+                         for link in soup.find_all('a') 
+                         if link.get('href')]
+                time.sleep(random.uniform(self.delay_min, self.delay_max))
+                return links
             except (requests.exceptions.HTTPError, 
                     requests.exceptions.ConnectionError, 
                     requests.exceptions.Timeout) as e:
@@ -55,11 +69,7 @@ class ParallelWebScraper:
                 return []
 
     def process_url(self, url):
-        """Process a single URL and return its links."""
-        if not url or not self.is_valid_url(url):
-            return set(), set()
-
-        if url in self.scraped_urls:
+        if not self.is_valid_url(url) or url in self.scraped_urls:
             return set(), set()
 
         links = self.get_all_links(url)
@@ -71,7 +81,7 @@ class ParallelWebScraper:
                 logging.warning(f"Invalid link found: {link}")
                 continue
             domain = self.get_domain_name(link)
-            if domain in self.white_list_domains:
+            if any(self.is_subdomain(domain, main_domain) for main_domain in self.white_list_domains):
                 internal_links.add(link)
             else:
                 external_links.add(link)
@@ -79,16 +89,15 @@ class ParallelWebScraper:
         return internal_links, external_links
 
     def scrape_website(self, start_url):
-        """Scrape website starting from start_url using parallel processing."""
-        self.white_list_domains = set([self.get_domain_name(start_url), "www.shahandanchor.com"])
+        main_domain = self.get_domain_name(start_url)
+        self.white_list_domains = {main_domain, 'www.shahandanchor.com'}
         with self.lock:
             if start_url not in self.to_scrape:
                 self.to_scrape.append(start_url)
-        
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_url = {}
             while self.to_scrape or self.processing:
-                # Submit new tasks
                 while self.to_scrape and len(self.processing) < self.max_workers:
                     url = self.to_scrape.popleft()
                     with self.lock:
@@ -98,7 +107,6 @@ class ParallelWebScraper:
                     future = executor.submit(self.process_batch, url)
                     future_to_url[future] = url
 
-                # Process completed tasks
                 for future in as_completed(future_to_url):
                     url = future_to_url[future]
                     try:
@@ -109,19 +117,16 @@ class ParallelWebScraper:
                             if url in self.processing:
                                 self.processing.remove(url)
 
-                # Small delay to prevent CPU overuse
                 time.sleep(0.1)
 
         return self.scraped_urls, self.external_links
 
     def process_batch(self, url):
-        """Process a batch of URLs and update the shared data structures."""
         internal_links, external_links = self.process_url(url)
         with self.lock:
             if url in self.processing:
                 self.scraped_urls.add(url)
                 self.external_links.update(external_links)
-                # Add new internal links to processing queue
                 for link in internal_links:
                     if link not in self.scraped_urls and link not in self.processing:
                         self.to_scrape.append(link)
@@ -130,7 +135,6 @@ class ParallelWebScraper:
                 logging.warning(f"URL {url} already processed or scraped.")
 
 def write_links_to_file(filename, links):
-    """Write links to file with proper encoding."""
     try:
         with open(filename, "w", encoding='utf-8') as file:
             for link in links:
@@ -139,24 +143,15 @@ def write_links_to_file(filename, links):
         logging.error(f"Error writing to {filename}: {e}")
 
 def main():
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     start_url = "https://www.sakec.ac.in/"
     scraper = ParallelWebScraper(max_workers=10)
-    
     start_time = time.time()
     scraped_links, external_links = scraper.scrape_website(start_url)
     end_time = time.time()
-    
     print(f"\nScraped Links: {len(scraped_links)}")
     print(f"External Links: {len(external_links)}")
     print(f"Time taken: {end_time - start_time:.2f} seconds")
-    
-    # Write to files with proper encoding
     write_links_to_file("scraped_links.txt", scraped_links)
     write_links_to_file("external_links.txt", external_links)
 
