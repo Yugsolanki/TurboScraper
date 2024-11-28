@@ -3,47 +3,63 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
-import threading
 from collections import deque
 import logging
+import threading
 
 class ParallelWebScraper:
-    def __init__(self, max_workers=10, timeout=10):
+    def __init__(self, max_workers=10, timeout=10, max_retries=3):
         self.max_workers = max_workers
         self.timeout = timeout
+        self.max_retries = max_retries
         self.session = requests.Session()
         self.lock = threading.Lock()
         self.scraped_urls = set()
         self.external_links = set()
         self.to_scrape = deque()
         self.processing = set()
+        self.white_list_domains = set()
 
     def is_valid_url(self, url):
         """Check if url is valid."""
-        parsed = urlparse(url)
-        return bool(parsed.netloc) and bool(parsed.scheme)
+        try:
+            parsed = urlparse(url)
+            return bool(parsed.netloc) and bool(parsed.scheme)
+        except ValueError:
+            return False
 
     def get_domain_name(self, url):
         """Extract domain name from the given URL."""
         return urlparse(url).netloc
 
     def get_all_links(self, url):
-        """Extract all links from the given URL."""
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-            response.encoding = 'utf-8'  # Ensure proper encoding of response
-            soup = BeautifulSoup(response.text, 'html.parser')
-            return [urljoin(url, link.get('href')) 
-                   for link in soup.find_all('a') 
-                   if link.get('href')]
-        except Exception as e:
-            logging.error(f"Error fetching {url}: {e}")
-            return []
+        """Extract all links from the given URL with retry mechanism."""
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.session.get(url, timeout=self.timeout)
+                response.raise_for_status()
+                response.encoding = 'utf-8'
+                soup = BeautifulSoup(response.text, 'html.parser')
+                return [urljoin(url, link.get('href')) 
+                        for link in soup.find_all('a') 
+                        if link.get('href')]
+            except (requests.exceptions.HTTPError, 
+                    requests.exceptions.ConnectionError, 
+                    requests.exceptions.Timeout) as e:
+                logging.warning(f"Attempt {attempt + 1} failed to fetch {url}: {e}")
+                if attempt == self.max_retries:
+                    logging.error(f"Max retries reached for {url}")
+                    return []
+            except Exception as e:
+                logging.error(f"Error fetching {url}: {e}")
+                return []
 
     def process_url(self, url):
         """Process a single URL and return its links."""
-        if not url or url in self.scraped_urls:
+        if not url or not self.is_valid_url(url):
+            return set(), set()
+
+        if url in self.scraped_urls:
             return set(), set()
 
         links = self.get_all_links(url)
@@ -52,8 +68,10 @@ class ParallelWebScraper:
 
         for link in links:
             if not self.is_valid_url(link):
+                logging.warning(f"Invalid link found: {link}")
                 continue
-            if self.get_domain_name(link) in self.white_list_domains:
+            domain = self.get_domain_name(link)
+            if domain in self.white_list_domains:
                 internal_links.add(link)
             else:
                 external_links.add(link)
@@ -63,16 +81,33 @@ class ParallelWebScraper:
     def scrape_website(self, start_url):
         """Scrape website starting from start_url using parallel processing."""
         self.white_list_domains = set([self.get_domain_name(start_url), "www.shahandanchor.com"])
-        self.to_scrape.append(start_url)
+        with self.lock:
+            if start_url not in self.to_scrape:
+                self.to_scrape.append(start_url)
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_url = {}
             while self.to_scrape or self.processing:
                 # Submit new tasks
                 while self.to_scrape and len(self.processing) < self.max_workers:
                     url = self.to_scrape.popleft()
-                    if url not in self.scraped_urls and url not in self.processing:
+                    with self.lock:
+                        if url in self.scraped_urls or url in self.processing:
+                            continue
                         self.processing.add(url)
-                        executor.submit(self.process_batch, url)
+                    future = executor.submit(self.process_batch, url)
+                    future_to_url[future] = url
+
+                # Process completed tasks
+                for future in as_completed(future_to_url):
+                    url = future_to_url[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logging.error(f"Error processing {url}: {e}")
+                        with self.lock:
+                            if url in self.processing:
+                                self.processing.remove(url)
 
                 # Small delay to prevent CPU overuse
                 time.sleep(0.1)
@@ -81,26 +116,18 @@ class ParallelWebScraper:
 
     def process_batch(self, url):
         """Process a batch of URLs and update the shared data structures."""
-        try:
-            internal_links, external_links = self.process_url(url)
-            
-            with self.lock:
+        internal_links, external_links = self.process_url(url)
+        with self.lock:
+            if url in self.processing:
                 self.scraped_urls.add(url)
                 self.external_links.update(external_links)
-                
                 # Add new internal links to processing queue
                 for link in internal_links:
-                    if (link not in self.scraped_urls and 
-                        link not in self.processing and 
-                        link not in self.to_scrape):
+                    if link not in self.scraped_urls and link not in self.processing:
                         self.to_scrape.append(link)
-                
                 self.processing.remove(url)
-                
-        except Exception as e:
-            logging.error(f"Error processing batch with {url}: {e}")
-            with self.lock:
-                self.processing.remove(url)
+            else:
+                logging.warning(f"URL {url} already processed or scraped.")
 
 def write_links_to_file(filename, links):
     """Write links to file with proper encoding."""
