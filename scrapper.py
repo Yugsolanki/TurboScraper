@@ -22,6 +22,7 @@ class AsyncParallelWebScraper:
         self.processing = set()
         self.white_list_domains = set()
         self.playwright_semaphore = asyncio.Semaphore(2)  # Limit concurrent Playwright requests
+        self.domain_response_times = {}  # To track response times per domain
 
     async def initialize(self):
         self.session = aiohttp.ClientSession()
@@ -44,9 +45,20 @@ class AsyncParallelWebScraper:
         return urlparse(url).netloc.lower()
 
     async def fetch_page(self, url, max_retries=3):
+        domain = self.get_domain_name(url)
+        current_timeout = self.domain_response_times.get(domain, self.timeout)
         for attempt in range(max_retries + 1):
             try:
-                async with self.session.get(url, timeout=self.timeout) as response:
+                start_time = time.monotonic()
+                async with self.session.get(url, timeout=current_timeout) as response:
+                    elapsed_time = time.monotonic() - start_time
+                    if domain in self.domain_response_times:
+                        self.domain_response_times[domain] = (self.domain_response_times[domain] + elapsed_time) / 2
+                    else:
+                        self.domain_response_times[domain] = elapsed_time
+                    # Adjust timeout to be average response time plus buffer
+                    self.timeout = self.domain_response_times[domain] + 2
+                    logging.debug(f"Adjusted timeout for {domain}: {self.timeout:.2f} seconds")
                     if response.status == 200:
                         content_type = response.headers.get('Content-Type', '').lower()
                         if 'text/html' in content_type:
@@ -105,6 +117,14 @@ class AsyncParallelWebScraper:
                 if not is_valid_url_func(link):
                     logging.warning(f"Invalid link found: {link}")
                     continue
+                # Enforce HTTPS
+                if link.startswith('http://'):
+                    https_link = link.replace('http://', 'https://')
+                    if is_valid_url_func(https_link):
+                        link = https_link
+                    else:
+                        logging.info(f"Skipped invalid HTTPS conversion: {https_link}")
+                        continue
                 domain = self.get_domain_name(link)
                 if any(self.is_subdomain(domain, main_domain) for main_domain in self.white_list_domains):
                     if link not in self.scraped_urls and link not in self.processing:
@@ -120,13 +140,20 @@ class AsyncParallelWebScraper:
                 self.processing.remove(url)
 
     async def worker(self):
+        current_task = asyncio.current_task()
+        logging.debug(f"Worker task started: {current_task.get_name()}")
         while True:
             try:
                 url, depth = await self.to_scrape.get()
+                logging.debug(f"Task {current_task.get_name()} processing {url}")
                 await self.process_url(url, depth)
                 self.to_scrape.task_done()
-            except asyncio.QueueEmpty:
-                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                logging.debug(f"Worker task {current_task.get_name()} cancelled")
+                break
+            except Exception as e:
+                logging.error(f"Worker task {current_task.get_name()} error: {e}")
+                self.to_scrape.task_done()
 
     async def scrape_website(self, start_url):
         main_domain = self.get_domain_name(start_url)
@@ -140,10 +167,11 @@ class AsyncParallelWebScraper:
         await self.to_scrape.join()
         for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         return self.scraped_urls, self.external_links
 
 async def main():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     start_url = "https://crawler-test.com/"
     scraper = AsyncParallelWebScraper(max_concurrent=10, max_depth=3, rate_limit_delay=1)
     await scraper.initialize()
