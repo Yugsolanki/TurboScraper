@@ -9,11 +9,12 @@ import random
 import threading
 
 class ParallelWebScraper:
-    def __init__(self, max_workers=10, timeout=10, max_retries=3, max_depth=3):
+    def __init__(self, max_workers=10, timeout=10, max_retries=3, max_depth=3, rate_limit_delay=1):
         self.max_workers = max_workers
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_depth = max_depth
+        self.rate_limit_delay = rate_limit_delay
         self.session = requests.Session()
         self.session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
         self.lock = threading.Lock()
@@ -22,8 +23,6 @@ class ParallelWebScraper:
         self.to_scrape = deque()
         self.processing = set()
         self.white_list_domains = set()
-        self.delay_min = 0.5
-        self.delay_max = 1.0
 
     def is_subdomain(self, candidate, main_domain):
         candidate_parts = candidate.split('.')
@@ -42,6 +41,12 @@ class ParallelWebScraper:
     def get_domain_name(self, url):
         return urlparse(url).netloc.lower()
 
+    def calculate_backoff(self, attempt):
+        delay = 2 ** attempt
+        if delay > 16:
+            delay = 16
+        return delay
+
     def get_all_links(self, url, response):
         content_type = response.headers.get('Content-Type', '').lower()
         if 'text/html' not in content_type:
@@ -51,7 +56,7 @@ class ParallelWebScraper:
         links = [urljoin(url, link.get('href')) 
                  for link in soup.find_all('a') 
                  if link.get('href')]
-        time.sleep(random.uniform(self.delay_min, self.delay_max))
+        time.sleep(self.rate_limit_delay)
         return links
 
     def process_url(self, url, depth):
@@ -70,7 +75,9 @@ class ParallelWebScraper:
             except (requests.exceptions.HTTPError, 
                     requests.exceptions.ConnectionError, 
                     requests.exceptions.Timeout) as e:
-                logging.warning(f"Attempt {attempt + 1} failed to fetch {url}: {e}")
+                delay = self.calculate_backoff(attempt)
+                logging.warning(f"Attempt {attempt + 1} failed to fetch {url}: {e}. Retrying in {delay} seconds.")
+                time.sleep(delay)
                 if attempt == self.max_retries:
                     logging.error(f"Max retries reached for {url}")
                     return internal_links, external_links
@@ -105,6 +112,7 @@ class ParallelWebScraper:
                         if url in self.scraped_urls or url in self.processing:
                             continue
                         if depth > self.max_depth:
+                            logging.info(f"Max depth reached for {url}")
                             continue
                         self.processing.add(url)
                     future = executor.submit(self.process_batch, url, depth)
@@ -148,7 +156,7 @@ def write_links_to_file(filename, links):
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     start_url = "https://crawler-test.com/"
-    scraper = ParallelWebScraper(max_workers=10, max_depth=3)
+    scraper = ParallelWebScraper(max_workers=10, max_depth=3, rate_limit_delay=1)
     start_time = time.time()
     scraped_links, external_links = scraper.scrape_website(start_url)
     end_time = time.time()
