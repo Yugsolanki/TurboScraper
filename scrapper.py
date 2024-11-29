@@ -1,28 +1,37 @@
-import requests
-from bs4 import BeautifulSoup
+import aiohttp
+import asyncio
+from validators import url as is_valid_url_func
 from urllib.parse import urljoin, urlparse
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import deque
 import logging
-import random
-import threading
+import playwright.async_api as playwright
+from bs4 import BeautifulSoup
+import time
 
-class ParallelWebScraper:
-    def __init__(self, max_workers=10, timeout=10, max_retries=3, max_depth=3, rate_limit_delay=1):
-        self.max_workers = max_workers
+class AsyncParallelWebScraper:
+    def __init__(self, max_concurrent=10, timeout=10, max_retries=3, max_depth=3, rate_limit_delay=1):
+        self.max_concurrent = max_concurrent
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_depth = max_depth
         self.rate_limit_delay = rate_limit_delay
-        self.session = requests.Session()
-        self.session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
-        self.lock = threading.Lock()
+        self.session = None
+        self.lock = asyncio.Lock()
         self.scraped_urls = set()
         self.external_links = set()
-        self.to_scrape = deque()
+        self.to_scrape = asyncio.Queue()
         self.processing = set()
         self.white_list_domains = set()
+        self.playwright_semaphore = asyncio.Semaphore(2)  # Limit concurrent Playwright requests
+
+    async def initialize(self):
+        self.session = aiohttp.ClientSession()
+        self.playwright = await playwright.async_playwright().start()
+        self.browser = await self.playwright.firefox.launch()
+
+    async def close(self):
+        await self.session.close()
+        await self.browser.close()
+        await self.playwright.stop()
 
     def is_subdomain(self, candidate, main_domain):
         candidate_parts = candidate.split('.')
@@ -31,140 +40,127 @@ class ParallelWebScraper:
             return False
         return candidate_parts[-len(main_parts):] == main_parts
 
-    def is_valid_url(self, url):
-        try:
-            parsed = urlparse(url)
-            return bool(parsed.netloc) and bool(parsed.scheme)
-        except ValueError:
-            return False
-
     def get_domain_name(self, url):
         return urlparse(url).netloc.lower()
 
-    def calculate_backoff(self, attempt):
-        delay = 2 ** attempt
-        if delay > 16:
-            delay = 16
-        return delay
-
-    def get_all_links(self, url, response):
-        content_type = response.headers.get('Content-Type', '').lower()
-        if 'text/html' not in content_type:
-            logging.info(f"Skipping non-HTML content: {url}")
-            return []
-        soup = BeautifulSoup(response.content, 'html.parser')
-        links = [urljoin(url, link.get('href')) 
-                 for link in soup.find_all('a') 
-                 if link.get('href')]
-        time.sleep(self.rate_limit_delay)
-        return links
-
-    def process_url(self, url, depth):
-        if not self.is_valid_url(url) or url in self.scraped_urls:
-            return set(), set()
-
-        internal_links = set()
-        external_links = set()
-
-        for attempt in range(self.max_retries + 1):
+    async def fetch_page(self, url, max_retries=3):
+        for attempt in range(max_retries + 1):
             try:
-                response = self.session.get(url, timeout=self.timeout)
-                response.raise_for_status()
-                links = self.get_all_links(url, response)
-                break
-            except (requests.exceptions.HTTPError, 
-                    requests.exceptions.ConnectionError, 
-                    requests.exceptions.Timeout) as e:
-                delay = self.calculate_backoff(attempt)
-                logging.warning(f"Attempt {attempt + 1} failed to fetch {url}: {e}. Retrying in {delay} seconds.")
-                time.sleep(delay)
-                if attempt == self.max_retries:
-                    logging.error(f"Max retries reached for {url}")
-                    return internal_links, external_links
+                async with self.session.get(url, timeout=self.timeout) as response:
+                    if response.status == 200:
+                        content_type = response.headers.get('Content-Type', '').lower()
+                        if 'text/html' in content_type:
+                            content = await response.read()
+                            return content
+                        else:
+                            logging.info(f"Skipping non-HTML content: {url}")
+                            return None
+                    else:
+                        logging.warning(f"Non-200 status code {response.status} for {url}")
+                        return None
             except Exception as e:
-                logging.error(f"Error fetching {url}: {e}")
-                return internal_links, external_links
+                delay = 2 ** attempt
+                if delay > 16:
+                    delay = 16
+                logging.warning(f"Attempt {attempt + 1} failed to fetch {url}: {e}. Retrying in {delay} seconds.")
+                await asyncio.sleep(delay)
+        logging.error(f"Max retries reached for {url}")
+        return None
 
-        for link in links:
-            if not self.is_valid_url(link):
-                logging.warning(f"Invalid link found: {link}")
-                continue
-            domain = self.get_domain_name(link)
-            if any(self.is_subdomain(domain, main_domain) for main_domain in self.white_list_domains):
-                internal_links.add((link, depth + 1))
+    async def fetch_with_playwright(self, url):
+        async with self.playwright_semaphore:
+            page = await self.browser.new_page()
+            try:
+                await page.goto(url)
+                content = await page.content()
+            except Exception as e:
+                logging.error(f"Error fetching {url} with Playwright: {e}")
+                content = None
+            finally:
+                await page.close()
+            return content.encode('utf-8') if content else None
+
+    async def process_url(self, url, depth):
+        async with self.lock:
+            if url in self.scraped_urls or url in self.processing:
+                return
+            if depth > self.max_depth:
+                return
+            self.processing.add(url)
+        try:
+            if 'www.example.com' in url:  # Replace with actual condition
+                content = await self.fetch_with_playwright(url)
             else:
-                external_links.add(link)
+                content = await self.fetch_page(url)
+            if content is None:
+                return
+            # Parse the content with BeautifulSoup
+            soup = BeautifulSoup(content, 'html.parser')
+            # Extract links
+            links = [urljoin(url, link.get('href')) 
+                     for link in soup.find_all('a') 
+                     if link.get('href')]
+            # Validate and enqueue new links
+            for link in links:
+                if not is_valid_url_func(link):
+                    logging.warning(f"Invalid link found: {link}")
+                    continue
+                domain = self.get_domain_name(link)
+                if any(self.is_subdomain(domain, main_domain) for main_domain in self.white_list_domains):
+                    if link not in self.scraped_urls and link not in self.processing:
+                        await self.to_scrape.put((link, depth + 1))
+                else:
+                    async with self.lock:
+                        self.external_links.add(link)
+        except Exception as e:
+            logging.error(f"Error processing {url}: {e}")
+        finally:
+            async with self.lock:
+                self.scraped_urls.add(url)
+                self.processing.remove(url)
 
-        return internal_links, external_links
+    async def worker(self):
+        while True:
+            try:
+                url, depth = await self.to_scrape.get()
+                await self.process_url(url, depth)
+                self.to_scrape.task_done()
+            except asyncio.QueueEmpty:
+                await asyncio.sleep(0.1)
 
-    def scrape_website(self, start_url):
+    async def scrape_website(self, start_url):
         main_domain = self.get_domain_name(start_url)
         self.white_list_domains = {main_domain}
         initial_depth = 0
-        self.to_scrape.append((start_url, initial_depth))
-
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_url = {}
-            while self.to_scrape or self.processing:
-                while self.to_scrape and len(self.processing) < self.max_workers:
-                    url, depth = self.to_scrape.popleft()
-                    with self.lock:
-                        if url in self.scraped_urls or url in self.processing:
-                            continue
-                        if depth > self.max_depth:
-                            logging.info(f"Max depth reached for {url}")
-                            continue
-                        self.processing.add(url)
-                    future = executor.submit(self.process_batch, url, depth)
-                    future_to_url[future] = url
-
-                for future in as_completed(future_to_url):
-                    url = future_to_url[future]
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logging.error(f"Error processing {url}: {e}")
-                        with self.lock:
-                            if url in self.processing:
-                                self.processing.remove(url)
-
-                time.sleep(0.1)
-
+        await self.to_scrape.put((start_url, initial_depth))
+        tasks = []
+        for _ in range(self.max_concurrent):
+            task = asyncio.create_task(self.worker())
+            tasks.append(task)
+        await self.to_scrape.join()
+        for task in tasks:
+            task.cancel()
         return self.scraped_urls, self.external_links
 
-    def process_batch(self, url, depth):
-        internal_links, external_links = self.process_url(url, depth)
-        with self.lock:
-            if url in self.processing:
-                self.scraped_urls.add(url)
-                self.external_links.update(external_links)
-                for link, link_depth in internal_links:
-                    if link not in self.scraped_urls and link not in self.processing and link_depth <= self.max_depth:
-                        self.to_scrape.append((link, link_depth))
-                self.processing.remove(url)
-            else:
-                logging.warning(f"URL {url} already processed or scraped.")
-
-def write_links_to_file(filename, links):
-    try:
-        with open(filename, "w", encoding='utf-8') as file:
-            for link in links:
-                file.write(f"{link}\n")
-    except Exception as e:
-        logging.error(f"Error writing to {filename}: {e}")
-
-def main():
+async def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     start_url = "https://crawler-test.com/"
-    scraper = ParallelWebScraper(max_workers=10, max_depth=3, rate_limit_delay=1)
+    scraper = AsyncParallelWebScraper(max_concurrent=10, max_depth=3, rate_limit_delay=1)
+    await scraper.initialize()
     start_time = time.time()
-    scraped_links, external_links = scraper.scrape_website(start_url)
+    scraped_links, external_links = await scraper.scrape_website(start_url)
     end_time = time.time()
+    await scraper.close()
     print(f"\nScraped Links: {len(scraped_links)}")
     print(f"External Links: {len(external_links)}")
     print(f"Time taken: {end_time - start_time:.2f} seconds")
-    write_links_to_file("scraped_links.txt", scraped_links)
-    write_links_to_file("external_links.txt", external_links)
+    # Write to files with proper encoding
+    with open("scraped_links.txt", "w", encoding='utf-8') as file:
+        for link in scraped_links:
+            file.write(f"{link}\n")
+    with open("external_links.txt", "w", encoding='utf-8') as file:
+        for link in external_links:
+            file.write(f"{link}\n")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
