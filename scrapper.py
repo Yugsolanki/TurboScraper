@@ -6,6 +6,7 @@ import logging
 import playwright.async_api as playwright
 from bs4 import BeautifulSoup
 import time
+import tldextract
 
 class AsyncParallelWebScraper:
     def __init__(self, max_concurrent=10, timeout=10, max_retries=3, max_depth=3, rate_limit_delay=1):
@@ -57,16 +58,18 @@ class AsyncParallelWebScraper:
         await self.session.close()
         await self.browser.close()
         await self.playwright.stop()
-
+    
     def is_subdomain(self, candidate, main_domain):
-        candidate_parts = candidate.split('.')
-        main_parts = main_domain.split('.')
-        if len(candidate_parts) < len(main_parts):
-            return False
-        return candidate_parts[-len(main_parts):] == main_parts
-
+        candidate_extract = tldextract.extract(candidate)
+        main_extract = tldextract.extract(main_domain)
+        candidate_domain = candidate_extract.subdomain + '.' + candidate_extract.domain + '.' + candidate_extract.suffix
+        main_domain_full = main_extract.domain + '.' + main_extract.suffix
+        if candidate_extract.subdomain == '':
+            return candidate_extract.domain == main_extract.domain and candidate_extract.suffix == main_extract.suffix
+        return candidate_domain.endswith(main_domain_full)
+    
     def get_domain_name(self, url):
-        return urlparse(url).netloc.lower()
+        return urlparse(url).hostname.lower() if urlparse(url).hostname else ''
 
     async def fetch_page(self, url, max_retries=3):
         domain = self.get_domain_name(url)
