@@ -21,8 +21,23 @@ class AsyncParallelWebScraper:
         self.to_scrape = asyncio.Queue()
         self.processing = set()
         self.white_list_domains = set()
+        self.blacklisted_domains = set()  # New set for blacklisted domains
+        self.blacklisted_paths = set()   # New set for blacklisted paths
         self.playwright_semaphore = asyncio.Semaphore(2)  # Limit concurrent Playwright requests
         self.domain_response_times = {}  # To track response times per domain
+
+    def add_to_blacklist(self, domain=None, path=None):
+        """Add domain(s) or path(s) to the blacklist."""
+        if domain:
+            if isinstance(domain, str):
+                self.blacklisted_domains.add(domain.lower())
+            elif isinstance(domain, list):
+                self.blacklisted_domains.update([d.lower() for d in domain])
+        if path:
+            if isinstance(path, str):
+                self.blacklisted_paths.add(path.lower())
+            elif isinstance(path, list):
+                self.blacklisted_paths.update([p.lower() for p in path])
 
     async def initialize(self):
         self.session = aiohttp.ClientSession()
@@ -98,20 +113,35 @@ class AsyncParallelWebScraper:
                 return
             if depth > self.max_depth:
                 return
+            # Check if URL is blacklisted
+            domain = self.get_domain_name(url)
+            if domain in self.blacklisted_domains:
+                logging.info(f"Skipping blacklisted domain: {url}")
+                return
+            parsed_url = urlparse(url)
+            if parsed_url.path.lower() in self.blacklisted_paths:
+                logging.info(f"Skipping blacklisted path: {url}")
+                return
             self.processing.add(url)
         try:
-            if 'www.example.com' in url:  # Replace with actual condition
+            if 'crawler-test.com' in url:  # Replace with actual condition
                 content = await self.fetch_with_playwright(url)
             else:
                 content = await self.fetch_page(url)
             if content is None:
                 return
             # Parse the content with BeautifulSoup
-            soup = BeautifulSoup(content, 'html.parser')
+            try:
+                soup = BeautifulSoup(content, 'html.parser')
+            except Exception as e:
+                logging.error(f"Error parsing HTML for {url}: {e}")
+                return
             # Extract links
-            links = [urljoin(url, link.get('href')) 
-                     for link in soup.find_all('a') 
-                     if link.get('href')]
+            links = []
+            for link in soup.find_all('a'):
+                href = link.get('href')
+                if href:
+                    links.append(urljoin(url, href))
             # Validate and enqueue new links
             for link in links:
                 if not is_valid_url_func(link):
@@ -127,6 +157,11 @@ class AsyncParallelWebScraper:
                         continue
                 domain = self.get_domain_name(link)
                 if any(self.is_subdomain(domain, main_domain) for main_domain in self.white_list_domains):
+                    # Check if the link is blacklisted
+                    parsed_link = urlparse(link)
+                    if domain in self.blacklisted_domains or parsed_link.path.lower() in self.blacklisted_paths:
+                        logging.info(f"Skipping blacklisted link: {link}")
+                        continue
                     if link not in self.scraped_urls and link not in self.processing:
                         await self.to_scrape.put((link, depth + 1))
                 else:
@@ -155,9 +190,13 @@ class AsyncParallelWebScraper:
                 logging.error(f"Worker task {current_task.get_name()} error: {e}")
                 self.to_scrape.task_done()
 
-    async def scrape_website(self, start_url):
+    async def scrape_website(self, start_url, blacklisted_domains=None, blacklisted_paths=None):
         main_domain = self.get_domain_name(start_url)
         self.white_list_domains = {main_domain}
+        if blacklisted_domains:
+            self.add_to_blacklist(domain=blacklisted_domains)
+        if blacklisted_paths:
+            self.add_to_blacklist(path=blacklisted_paths)
         initial_depth = 0
         await self.to_scrape.put((start_url, initial_depth))
         tasks = []
@@ -173,8 +212,13 @@ class AsyncParallelWebScraper:
 async def main():
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     start_url = "https://crawler-test.com/"
+    # Define blacklisted domains and paths
+    blacklisted_domains = ['blacklisteddomain.com']
+    blacklisted_paths = ['/blacklisted/path', '/another/blacklisted/path']
     scraper = AsyncParallelWebScraper(max_concurrent=10, max_depth=3, rate_limit_delay=1)
     await scraper.initialize()
+    # Add blacklisted domains and paths
+    scraper.add_to_blacklist(domain=blacklisted_domains, path=blacklisted_paths)
     start_time = time.time()
     scraped_links, external_links = await scraper.scrape_website(start_url)
     end_time = time.time()
