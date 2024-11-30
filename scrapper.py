@@ -23,6 +23,7 @@ class AsyncParallelWebScraper:
         self.white_list_domains = set()
         self.blacklisted_domains = set()  # New set for blacklisted domains
         self.blacklisted_paths = set()   # New set for blacklisted paths
+        self.whitelisted_paths = set()   # New set for whitelisted paths
         self.playwright_semaphore = asyncio.Semaphore(2)  # Limit concurrent Playwright requests
         self.domain_response_times = {}  # To track response times per domain
 
@@ -38,6 +39,14 @@ class AsyncParallelWebScraper:
                 self.blacklisted_paths.add(path.lower())
             elif isinstance(path, list):
                 self.blacklisted_paths.update([p.lower() for p in path])
+
+    def add_to_whitelist(self, path=None):
+        """Add path(s) to the whitelist."""
+        if path:
+            if isinstance(path, str):
+                self.whitelisted_paths.add(path.lower())
+            elif isinstance(path, list):
+                self.whitelisted_paths.update([p.lower() for p in path])
 
     async def initialize(self):
         self.session = aiohttp.ClientSession()
@@ -119,9 +128,15 @@ class AsyncParallelWebScraper:
                 logging.info(f"Skipping blacklisted domain: {url}")
                 return
             parsed_url = urlparse(url)
-            if parsed_url.path.lower() in self.blacklisted_paths:
+            path = parsed_url.path.lower()
+            if path in self.blacklisted_paths:
                 logging.info(f"Skipping blacklisted path: {url}")
                 return
+            # Check if URL is whitelisted
+            if self.whitelisted_paths:
+                if path not in self.whitelisted_paths:
+                    logging.info(f"Skipping non-whitelisted path: {url}")
+                    return
             self.processing.add(url)
         try:
             if 'crawler-test.com' in url:  # Replace with actual condition
@@ -157,10 +172,14 @@ class AsyncParallelWebScraper:
                         continue
                 domain = self.get_domain_name(link)
                 if any(self.is_subdomain(domain, main_domain) for main_domain in self.white_list_domains):
-                    # Check if the link is blacklisted
+                    # Check if the link is blacklisted or not whitelisted
                     parsed_link = urlparse(link)
-                    if domain in self.blacklisted_domains or parsed_link.path.lower() in self.blacklisted_paths:
+                    path = parsed_link.path.lower()
+                    if domain in self.blacklisted_domains or path in self.blacklisted_paths:
                         logging.info(f"Skipping blacklisted link: {link}")
+                        continue
+                    if self.whitelisted_paths and path not in self.whitelisted_paths:
+                        logging.info(f"Skipping non-whitelisted link: {link}")
                         continue
                     if link not in self.scraped_urls and link not in self.processing:
                         await self.to_scrape.put((link, depth + 1))
@@ -190,13 +209,15 @@ class AsyncParallelWebScraper:
                 logging.error(f"Worker task {current_task.get_name()} error: {e}")
                 self.to_scrape.task_done()
 
-    async def scrape_website(self, start_url, blacklisted_domains=None, blacklisted_paths=None):
+    async def scrape_website(self, start_url, blacklisted_domains=None, blacklisted_paths=None, whitelisted_paths=None):
         main_domain = self.get_domain_name(start_url)
         self.white_list_domains = {main_domain}
         if blacklisted_domains:
             self.add_to_blacklist(domain=blacklisted_domains)
         if blacklisted_paths:
             self.add_to_blacklist(path=blacklisted_paths)
+        if whitelisted_paths:
+            self.add_to_whitelist(path=whitelisted_paths)
         initial_depth = 0
         await self.to_scrape.put((start_url, initial_depth))
         tasks = []
@@ -210,23 +231,34 @@ class AsyncParallelWebScraper:
         return self.scraped_urls, self.external_links
 
 async def main():
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    # Configure logging to both console and file
+    logging.basicConfig(level=logging.DEBUG,
+                        format='%(asctime)s - %(levelname)s - %(message)s',
+                        handlers=[
+                            logging.StreamHandler(),
+                            logging.FileHandler('scraper.log', mode='w')
+                        ])
     start_url = "https://crawler-test.com/"
-    # Define blacklisted domains and paths
+    # Define blacklisted and whitelisted domains and paths
     blacklisted_domains = ['blacklisteddomain.com']
     blacklisted_paths = ['/blacklisted/path', '/another/blacklisted/path']
+    whitelisted_paths = [] # ['/whitelisted/path', '/another/whitelisted/path']
     scraper = AsyncParallelWebScraper(max_concurrent=10, max_depth=3, rate_limit_delay=1)
     await scraper.initialize()
-    # Add blacklisted domains and paths
+    # Add blacklisted and whitelisted domains and paths
     scraper.add_to_blacklist(domain=blacklisted_domains, path=blacklisted_paths)
+    scraper.add_to_whitelist(path=whitelisted_paths)
     start_time = time.time()
-    scraped_links, external_links = await scraper.scrape_website(start_url)
+    scraped_links, external_links = await scraper.scrape_website(start_url,
+                                                                 blacklisted_domains=blacklisted_domains,
+                                                                 blacklisted_paths=blacklisted_paths,
+                                                                 whitelisted_paths=whitelisted_paths)
     end_time = time.time()
     await scraper.close()
     print(f"\nScraped Links: {len(scraped_links)}")
     print(f"External Links: {len(external_links)}")
     print(f"Time taken: {end_time - start_time:.2f} seconds")
-    # Write to files with proper encoding
+    # Write to files with proper encoding and include metadata
     with open("scraped_links.txt", "w", encoding='utf-8') as file:
         for link in scraped_links:
             file.write(f"{link}\n")
