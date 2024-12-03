@@ -1,7 +1,7 @@
 import aiohttp
 import asyncio
 from validators import url as is_valid_url_func
-from urllib.parse import urljoin, urlparse, urlsplit
+from urllib.parse import urljoin, urlparse
 import logging
 import playwright.async_api as playwright
 from bs4 import BeautifulSoup
@@ -9,14 +9,19 @@ import time
 import tldextract
 import re
 import os
+from robotsparser.parser import Robotparser
 
 class AsyncParallelWebScraper:
-    def __init__(self, max_concurrent=10, timeout=10, max_retries=3, max_depth=3, rate_limit_delay=1):
+    def __init__(self, max_concurrent=10, timeout=10, max_retries=3, max_depth=3, rate_limit_delay=1,
+                 respect_robots=True, user_agents=['MyScraper/1.0 (contact@example.com)']):
         self.max_concurrent = max_concurrent
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_depth = max_depth
         self.rate_limit_delay = rate_limit_delay
+        self.respect_robots = respect_robots
+        self.user_agents = user_agents
+        self.current_user_agent = 0
         self.session = None
         self.lock = asyncio.Lock()
         self.scraped_urls = set()
@@ -27,9 +32,11 @@ class AsyncParallelWebScraper:
         self.blacklisted_domains = set()
         self.blacklisted_paths_patterns = []
         self.whitelisted_paths_patterns = []
-        self.playwright_semaphore = asyncio.Semaphore(max(os.cpu_count() or 1, 1))  # Adjust semaphore limit
+        self.playwright_semaphore = asyncio.Semaphore(max(os.cpu_count() or 1, 1))
         self.domain_response_times = {}
+        self.rate_limits = {}
         self.cancel_event = asyncio.Event()
+        self.robots_parsers = {}
 
     def add_to_blacklist(self, domain=None, paths=None, path_patterns=None):
         if domain:
@@ -60,25 +67,55 @@ class AsyncParallelWebScraper:
         await self.browser.close()
         await self.playwright.stop()
 
-    def is_subdomain(self, candidate, main_domain):
-        candidate_extract = tldextract.extract(candidate)
-        main_extract = tldextract.extract(main_domain)
-        candidate_domain = candidate_extract.subdomain + '.' + candidate_extract.domain + '.' + candidate_extract.suffix
-        main_domain_full = main_extract.domain + '.' + main_extract.suffix
-        if candidate_extract.subdomain == '':
-            return candidate_extract.domain == main_extract.domain and candidate_extract.suffix == main_extract.suffix
-        return candidate_domain.endswith(main_domain_full)
+    def get_headers(self):
+        headers = {
+            'User-Agent': self.user_agents[self.current_user_agent],
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+        self.current_user_agent = (self.current_user_agent + 1) % len(self.user_agents)
+        return headers
+
+    async def get_robots_parser(self, domain):
+        if domain in self.robots_parsers:
+            return self.robots_parsers[domain]
+        robots_url = f"http://{domain}/robots.txt"
+        try:
+            rb = Robotparser(url=robots_url, verbose=True)
+            await asyncio.to_thread(rb.read, fetch_sitemap_urls=True, sitemap_url_crawl_limit=5)
+            self.robots_parsers[domain] = rb
+            return rb
+        except Exception as e:
+            logging.warning(f"Failed to fetch or parse robots.txt for {domain}: {e}")
+            return None
+
+    async def is_allowed(self, url, user_agent=None):
+        domain = self.get_domain_name(url)
+        rb = await self.get_robots_parser(domain)
+        if rb:
+            if user_agent is None:
+                user_agent = self.user_agents[self.current_user_agent]
+            # Assuming Robotparser has a method to check if a URL is allowed
+            # Adjust according to the actual API of robotsparser
+            return rb.is_allowed(user_agent, url)
+        return True  # If no robots.txt, assume allowed
 
     def get_domain_name(self, url):
         return urlparse(url).hostname.lower() if urlparse(url).hostname else ''
 
     async def fetch_page(self, url, max_retries=3):
         domain = self.get_domain_name(url)
+        now = time.monotonic()
+        if domain in self.rate_limits:
+            delay = self.rate_limits[domain] + self.rate_limit_delay - now
+            if delay > 0:
+                await asyncio.sleep(delay)
         current_timeout = self.domain_response_times.get(domain, self.timeout)
+        headers = self.get_headers()
         for attempt in range(max_retries + 1):
             try:
                 start_time = time.monotonic()
-                async with self.session.get(url, timeout=current_timeout) as response:
+                async with self.session.get(url, headers=headers, timeout=current_timeout) as response:
                     elapsed_time = time.monotonic() - start_time
                     if domain in self.domain_response_times:
                         self.domain_response_times[domain] = (self.domain_response_times[domain] + elapsed_time) / 2
@@ -90,6 +127,7 @@ class AsyncParallelWebScraper:
                         content_type = response.headers.get('Content-Type', '').lower()
                         if 'text/html' in content_type:
                             content = await response.read()
+                            self.rate_limits[domain] = time.monotonic()
                             return content
                         else:
                             logging.info(f"Skipping non-HTML content: {url}")
@@ -107,11 +145,19 @@ class AsyncParallelWebScraper:
         return None
 
     async def fetch_with_playwright(self, url):
+        domain = self.get_domain_name(url)
+        now = time.monotonic()
+        if domain in self.rate_limits:
+            delay = self.rate_limits[domain] + self.rate_limit_delay - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+        headers = self.get_headers()
         async with self.playwright_semaphore:
-            page = await self.browser.new_page()
+            page = await self.browser.new_page(extra_http_headers=headers)
             try:
                 await page.goto(url)
                 content = await page.content()
+                self.rate_limits[domain] = time.monotonic()
             except Exception as e:
                 logging.error(f"Error fetching {url} with Playwright: {e}")
                 content = None
@@ -120,6 +166,11 @@ class AsyncParallelWebScraper:
             return content.encode('utf-8') if content else None
 
     async def process_url(self, url, depth):
+        if self.respect_robots:
+            allowed = await self.is_allowed(url)
+            if not allowed:
+                logging.info(f"Robots.txt disallows crawling {url}")
+                return
         async with self.lock:
             if url in self.scraped_urls or url in self.processing:
                 return
@@ -169,7 +220,7 @@ class AsyncParallelWebScraper:
                     except aiohttp.ClientError:
                         logging.info(f"HTTPS not available for {link}, using HTTP.")
                 domain = self.get_domain_name(link)
-                if any(self.is_subdomain(domain, main_domain) for main_domain in self.white_list_domains):
+                if any(domain == main_domain for main_domain in self.white_list_domains):
                     parsed_link = urlparse(link)
                     path = parsed_link.path.lower()
                     if domain in self.blacklisted_domains or any(pattern.match(path) for pattern in self.blacklisted_paths_patterns):
@@ -242,7 +293,7 @@ async def main():
     blacklisted_domains = ['blacklisteddomain.com']
     blacklisted_paths = [r'/blacklisted/path.*', r'/another/blacklisted/path.*']
     whitelisted_paths = []  # [r'/whitelisted/path.*', r'/another/whitelisted/path.*']
-    scraper = AsyncParallelWebScraper(max_concurrent=10, max_depth=3, rate_limit_delay=1)
+    scraper = AsyncParallelWebScraper(max_concurrent=10, max_depth=3, rate_limit_delay=1, respect_robots=True)
     await scraper.initialize()
     scraper.add_to_blacklist(domain=blacklisted_domains, path_patterns=blacklisted_paths)
     scraper.add_to_whitelist(path_patterns=whitelisted_paths)
