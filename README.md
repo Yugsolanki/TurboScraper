@@ -1,8 +1,8 @@
-# AsyncParallelWebScraper
+# TurboScraper
 
 ## Overview
 
-`AsyncParallelWebScraper` is an asynchronous web scraper designed to efficiently crawl websites by leveraging concurrency and respecting robots.txt rules. This tool is built using `aiohttp` for asynchronous HTTP requests, `playwright` for browser-based scraping, and `BeautifulSoup` for HTML parsing.
+**TurboScraper** is an asynchronous web scraping tool optimized for fast and efficient website crawling. It utilizes concurrency and adheres to robots.txt rules, ensuring respectful and scalable scraping. Powered by `aiohttp` for async HTTP requests, `playwright` for handling dynamic content, and `BeautifulSoup` for HTML parsing, it specializes in **link extraction only**. Ideal for gathering URLs from dynamic websites and large-scale crawling tasks, TurboScraper is designed for speed, precision, and reliability.
 
 ## Features
 
