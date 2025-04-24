@@ -1,7 +1,7 @@
 [project]
-name = "link-scrapper"
-version = "0.1.0"
-description = "Add your description here"
+name = "TurboScraper"
+version = "1.0.0"
+description = "An asynchronous web scraper API built with FastAPI and Playwright."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
