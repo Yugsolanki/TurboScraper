@@ -23,6 +23,7 @@ import traceback
 class ScraperConfig(BaseModel):
     max_concurrent: int = Field(default=10)
     timeout: int = Field(default=10)
+    playwright_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
     max_depth: float = Field(default=float('inf'))
     rate_limit_delay: float = Field(default=1.0)
@@ -81,6 +82,7 @@ class AsyncParallelWebScraper:
 
         self.max_concurrent = config.max_concurrent
         self.timeout = config.timeout
+        self.playwright_timeout = config.playwright_timeout
         self.max_retries = config.max_retries
         self.max_depth = config.max_depth
         self.rate_limit_delay = config.rate_limit_delay
@@ -325,6 +327,7 @@ class AsyncParallelWebScraper:
                 await asyncio.sleep(delay)
 
         current_timeout = self.domain_response_times.get(domain, self.timeout)
+        current_timeout = min(current_timeout + 2, 30)
         headers = self.get_headers()
 
         for attempt in range(max_retries + 1):
@@ -339,10 +342,6 @@ class AsyncParallelWebScraper:
                             self.domain_response_times[domain] + elapsed_time) / 2
                     else:
                         self.domain_response_times[domain] = elapsed_time
-
-                    # Cap at 30 seconds
-                    self.timeout = min(
-                        self.domain_response_times[domain] + 2, 30)
 
                     if response.status == 200:
                         content_type = response.headers.get(
@@ -370,13 +369,53 @@ class AsyncParallelWebScraper:
         self.logger.error(f"Max retries reached for {url}")
         return None
 
-    async def fetch_with_playwright(self, url: str) -> Optional[bytes]:
+    # async def fetch_with_playwright(self, url: str) -> Optional[bytes]:
+    #     """
+    #     Fetch the content of a page using Playwright.
+
+    #     :param url: The URL to fetch
+    #     :return: The page content or None if failed
+    #     """
+    #     if not self.browser:
+    #         self.logger.error("Browser not initialized")
+    #         return None
+
+    #     domain = self.get_domain_name(url)
+    #     now = time.monotonic()
+
+    #     # Respect rate limiting
+    #     if domain in self.rate_limits:
+    #         delay = self.rate_limits[domain] + self.rate_limit_delay - now
+    #         if delay > 0:
+    #             await asyncio.sleep(delay)
+
+    #     headers = self.get_headers()
+
+    #     async with self.playwright_semaphore:
+    #         page = await self.browser.new_page(extra_http_headers=headers)
+    #         try:
+    #             self.logger.debug(f"Fetching {url} with Playwright")
+    #             await page.goto(url, timeout=self.timeout * 1000)
+    #             content = await page.content()
+    #             self.rate_limits[domain] = time.monotonic()
+    #             return content.encode('utf-8') if content else None
+    #         except Exception as e:
+    #             self.logger.error(f"Error fetching {url} with Playwright: {e}")
+    #             return None
+    #         finally:
+    #             await page.close()
+
+    async def fetch_with_playwright(self, url: str, max_retries: int = None) -> Optional[bytes]:
         """
-        Fetch the content of a page using Playwright.
+        Fetch the content of a page using Playwright with retry logic.
 
         :param url: The URL to fetch
+        :param max_retries: Maximum number of retries
         :return: The page content or None if failed
         """
+        if max_retries is None:
+            max_retries = self.max_retries
+        
         if not self.browser:
             self.logger.error("Browser not initialized")
             return None
@@ -391,20 +430,56 @@ class AsyncParallelWebScraper:
                 await asyncio.sleep(delay)
 
         headers = self.get_headers()
+        
+        # Use a longer timeout for Playwright (JS-heavy pages need more time)
+        # Minimum 30 seconds, or configured timeout
+        playwright_timeout = max(self.timeout * 1000, 30000)
 
-        async with self.playwright_semaphore:
-            page = await self.browser.new_page(extra_http_headers=headers)
+        for attempt in range(max_retries + 1):
+            page = None
             try:
-                self.logger.debug(f"Fetching {url} with Playwright")
-                await page.goto(url, timeout=self.timeout * 1000)
-                content = await page.content()
-                self.rate_limits[domain] = time.monotonic()
-                return content.encode('utf-8') if content else None
+                async with self.playwright_semaphore:
+                    page = await self.browser.new_page(extra_http_headers=headers)
+                    self.logger.debug(
+                        f"Fetching {url} with Playwright (attempt {attempt + 1}/{max_retries + 1})"
+                    )
+                    
+                    # Use "domcontentloaded" instead of "load" for faster response
+                    # "load" waits for ALL resources including images, fonts, etc.
+                    await page.goto(
+                        url, 
+                        timeout=playwright_timeout, 
+                        wait_until="domcontentloaded"
+                    )
+                    
+                    # Optional: Wait for network to be mostly idle
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        # networkidle is best-effort, continue if it times out
+                        self.logger.debug(f"Network idle timeout for {url}, continuing...")
+                    
+                    content = await page.content()
+                    self.rate_limits[domain] = time.monotonic()
+                    return content.encode('utf-8') if content else None
+                    
             except Exception as e:
-                self.logger.error(f"Error fetching {url} with Playwright: {e}")
-                return None
+                delay = min(2 ** attempt, 16)
+                self.logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries + 1} failed for {url} "
+                    f"with Playwright: {e}. Retrying in {delay}s."
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(delay)
             finally:
-                await page.close()
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+
+        self.logger.error(f"Max retries reached for {url} with Playwright")
+        return None
 
     async def process_url(self, url: str, depth: int) -> None:
         """
