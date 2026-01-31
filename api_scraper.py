@@ -25,12 +25,13 @@ class ScraperConfig(BaseModel):
     timeout: int = Field(default=10)
     playwright_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
-    max_depth: float = Field(default=float('inf'))
+    max_depth: float = Field(default=float("inf"))
     rate_limit_delay: float = Field(default=1.0)
     respect_robots: bool = Field(default=False)
     user_agents: Optional[List[str]] = Field(
         default_factory=lambda: [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"]
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+        ]
     )
 
 
@@ -44,15 +45,17 @@ class ScrapeRequest(BaseModel):
 
 class ScapeJob(BaseModel):
     """Configuration for the scraping job API."""
+
     max_concurrent: int = Field(default=10)
     timeout: int = Field(default=10)
     max_retries: int = Field(default=3)
-    max_depth: float = Field(default=float('inf'))
+    max_depth: float = Field(default=float("inf"))
     rate_limit_delay: float = Field(default=1.0)
     respect_robots: bool = Field(default=False)
     user_agents: Optional[List[str]] = Field(
         default_factory=lambda: [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"]
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+        ]
     )
     start_url: str
     whitelisted_domains: Optional[List[str]] = None
@@ -63,6 +66,7 @@ class ScapeJob(BaseModel):
 
 class ScrapeResponse(BaseModel):
     """Response model for the scraping job API."""
+
     scraped_urls: List[str] = []
     external_links: List[str] = []
     job_id: str = None
@@ -87,8 +91,11 @@ class AsyncParallelWebScraper:
         self.max_depth = config.max_depth
         self.rate_limit_delay = config.rate_limit_delay
         self.respect_robots = config.respect_robots
-        self.user_agents = config.user_agents if config.user_agents else [
-            "MyScraper/1.0 (contact@example.com)"]
+        self.user_agents = (
+            config.user_agents
+            if config.user_agents
+            else ["MyScraper/1.0 (contact@example.com)"]
+        )
 
         # State variables
         self.current_user_agent = 0
@@ -114,8 +121,8 @@ class AsyncParallelWebScraper:
         # Configure logging
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(lineno)d - %(funcName)s',
-            datefmt='%d-%m-%Y %H:%M:%S'
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(lineno)d - %(funcName)s",
+            datefmt="%d-%m-%Y %H:%M:%S",
         )
         self.logger = logging.getLogger("scraper")
 
@@ -127,8 +134,7 @@ class AsyncParallelWebScraper:
         self.session = aiohttp.ClientSession()
         self.to_scrape = asyncio.Queue()
         self.cancel_event = asyncio.Event()
-        self.playwright_semaphore = asyncio.Semaphore(
-            max(os.cpu_count() or 1, 1))
+        self.playwright_semaphore = asyncio.Semaphore(max(os.cpu_count() or 1, 1))
 
         try:
             self.playwright = await playwright.async_playwright().start()
@@ -137,7 +143,8 @@ class AsyncParallelWebScraper:
                 self.browser = await self.playwright.chromium.launch(headless=True)
             except NotImplementedError:
                 self.logger.error(
-                    "Chromium is not installed. Please install it. Launching firefox instead.")
+                    "Chromium is not installed. Please install it. Launching firefox instead."
+                )
                 self.browser = await self.playwright.firefox.launch(headless=True)
             self.logger.info("Playwright browser initialized successfully")
         except Exception as e:
@@ -161,8 +168,9 @@ class AsyncParallelWebScraper:
             await self.playwright.stop()
             self.playwright = None
 
-    def add_to_blacklist(self, domain: Union[str, List[str]] = None,
-                         paths: Union[str, List[str]] = None) -> None:
+    def add_to_blacklist(
+        self, domain: Union[str, List[str]] = None, paths: Union[str, List[str]] = None
+    ) -> None:
         """
         Add domains and path patterns to the blacklist.
 
@@ -179,11 +187,11 @@ class AsyncParallelWebScraper:
             if isinstance(paths, str):
                 self.blacklisted_paths_patterns.append(re.compile(paths))
             elif isinstance(paths, list):
-                self.blacklisted_paths_patterns.extend(
-                    [re.compile(p) for p in paths])
+                self.blacklisted_paths_patterns.extend([re.compile(p) for p in paths])
 
-    def add_to_whitelist(self, domain: Union[str, List[str]] = None,
-                         paths: Union[str, List[str]] = None) -> None:
+    def add_to_whitelist(
+        self, domain: Union[str, List[str]] = None, paths: Union[str, List[str]] = None
+    ) -> None:
         """
         Add domains and path patterns to the whitelist.
 
@@ -200,8 +208,7 @@ class AsyncParallelWebScraper:
             if isinstance(paths, str):
                 self.whitelisted_paths_patterns.append(re.compile(paths))
             elif isinstance(paths, list):
-                self.whitelisted_paths_patterns.extend(
-                    [re.compile(p) for p in paths])
+                self.whitelisted_paths_patterns.extend([re.compile(p) for p in paths])
 
     def get_headers(self) -> Dict[str, str]:
         """
@@ -219,12 +226,15 @@ class AsyncParallelWebScraper:
         # return headers
 
         headers = {
-            'User-Agent': self.user_agents[self.current_user_agent % len(self.user_agents)],
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            "User-Agent": self.user_agents[
+                self.current_user_agent % len(self.user_agents)
+            ],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
         }
-        self.current_user_agent = (
-            self.current_user_agent + 1) % max(len(self.user_agents), 1)
+        self.current_user_agent = (self.current_user_agent + 1) % max(
+            len(self.user_agents), 1
+        )
         return headers
 
     @staticmethod
@@ -235,7 +245,7 @@ class AsyncParallelWebScraper:
         :param url: The URL
         :return: The domain name
         """
-        return urlparse(url).hostname.lower() if urlparse(url).hostname else ''
+        return urlparse(url).hostname.lower() if urlparse(url).hostname else ""
 
     async def get_robots_parser(self, domain: str) -> Optional[Robotparser]:
         """
@@ -250,12 +260,13 @@ class AsyncParallelWebScraper:
         robots_url = f"http://{domain}/robots.txt"
         try:
             rb = Robotparser(url=robots_url, verbose=False)
-            await asyncio.to_thread(rb.read, fetch_sitemap_urls=True, sitemap_url_crawl_limit=5)
+            await asyncio.to_thread(
+                rb.read, fetch_sitemap_urls=True, sitemap_url_crawl_limit=5
+            )
             self.robots_parsers[domain] = rb
             return rb
         except Exception as e:
-            self.logger.warning(
-                f"Failed to fetch/parse robots.txt for {domain}: {e}")
+            self.logger.warning(f"Failed to fetch/parse robots.txt for {domain}: {e}")
             return None
 
     async def is_allowed(self, url: str, user_agent: str = None) -> bool:
@@ -301,10 +312,47 @@ class AsyncParallelWebScraper:
             return False
 
         # Check against whitelisted path patterns if any are set
-        if self.whitelisted_paths_patterns and not any(pattern.match(path) for pattern in self.whitelisted_paths_patterns):
+        if self.whitelisted_paths_patterns and not any(
+            pattern.match(path) for pattern in self.whitelisted_paths_patterns
+        ):
             return False
 
         return True
+
+    async def _progress_monitor(self, callback: callable, interval: int = 5) -> None:
+        """
+        Periodically calls the progress callback with status updates.
+
+        :param callback: The function to call with a status string
+        :param interval: Seconds between updates
+        """
+        while not self.cancel_event.is_set():
+            try:
+                # Calculate metrics
+                scraped_count = len(self.scraped_urls)
+                external_count = len(self.external_links)
+                queue_size = self.to_scrape.qsize()
+
+                message = (
+                    f"Progress: Scraped {scraped_count} pages | "
+                    f"External Links {external_count} | "
+                    f"Queue Size {queue_size}"
+                )
+
+                # Handle both async and sync callbacks
+                if asyncio.iscoroutinefunction(callback):
+                    await callback(message)
+                else:
+                    callback(message)
+
+                # Wait for next interval
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error in progress monitor: {e}")
+                # Don't break loop on logging error, just sleep and retry
+                await asyncio.sleep(interval)
 
     async def fetch_page(self, url: str, max_retries: int = None) -> Optional[bytes]:
         """
@@ -333,34 +381,34 @@ class AsyncParallelWebScraper:
         for attempt in range(max_retries + 1):
             try:
                 start_time = time.monotonic()
-                async with self.session.get(url, headers=headers, timeout=current_timeout) as response:
+                async with self.session.get(
+                    url, headers=headers, timeout=current_timeout
+                ) as response:
                     elapsed_time = time.monotonic() - start_time
 
                     # Update average response time for domain
                     if domain in self.domain_response_times:
                         self.domain_response_times[domain] = (
-                            self.domain_response_times[domain] + elapsed_time) / 2
+                            self.domain_response_times[domain] + elapsed_time
+                        ) / 2
                     else:
                         self.domain_response_times[domain] = elapsed_time
 
                     if response.status == 200:
-                        content_type = response.headers.get(
-                            'Content-Type', '').lower()
-                        if 'text/html' in content_type:
+                        content_type = response.headers.get("Content-Type", "").lower()
+                        if "text/html" in content_type:
                             content = await response.read()
                             self.rate_limits[domain] = time.monotonic()
                             return content
                         else:
-                            self.logger.info(
-                                f"Skipping non-HTML content: {url}")
+                            self.logger.info(f"Skipping non-HTML content: {url}")
                             return None
                     else:
-                        self.logger.warning(
-                            f"HTTP status {response.status} for {url}")
+                        self.logger.warning(f"HTTP status {response.status} for {url}")
                         return None
             except Exception as e:
                 # Exponential backoff capped at 16 seconds
-                delay = min(2 ** attempt, 16)
+                delay = min(2**attempt, 16)
                 self.logger.warning(
                     f"Attempt {attempt + 1}/{max_retries + 1} failed for {url}: {e}. Retrying in {delay}s."
                 )
@@ -405,7 +453,9 @@ class AsyncParallelWebScraper:
     #         finally:
     #             await page.close()
 
-    async def fetch_with_playwright(self, url: str, max_retries: int = None) -> Optional[bytes]:
+    async def fetch_with_playwright(
+        self, url: str, max_retries: int = None
+    ) -> Optional[bytes]:
         """
         Fetch the content of a page using Playwright with retry logic.
 
@@ -415,7 +465,7 @@ class AsyncParallelWebScraper:
         """
         if max_retries is None:
             max_retries = self.max_retries
-        
+
         if not self.browser:
             self.logger.error("Browser not initialized")
             return None
@@ -430,7 +480,7 @@ class AsyncParallelWebScraper:
                 await asyncio.sleep(delay)
 
         headers = self.get_headers()
-        
+
         # Use a longer timeout for Playwright (JS-heavy pages need more time)
         # Minimum 30 seconds, or configured timeout
         playwright_timeout = max(self.timeout * 1000, 30000)
@@ -443,28 +493,28 @@ class AsyncParallelWebScraper:
                     self.logger.debug(
                         f"Fetching {url} with Playwright (attempt {attempt + 1}/{max_retries + 1})"
                     )
-                    
+
                     # Use "domcontentloaded" instead of "load" for faster response
                     # "load" waits for ALL resources including images, fonts, etc.
                     await page.goto(
-                        url, 
-                        timeout=playwright_timeout, 
-                        wait_until="domcontentloaded"
+                        url, timeout=playwright_timeout, wait_until="domcontentloaded"
                     )
-                    
+
                     # Optional: Wait for network to be mostly idle
                     try:
                         await page.wait_for_load_state("networkidle", timeout=5000)
                     except Exception:
                         # networkidle is best-effort, continue if it times out
-                        self.logger.debug(f"Network idle timeout for {url}, continuing...")
-                    
+                        self.logger.debug(
+                            f"Network idle timeout for {url}, continuing..."
+                        )
+
                     content = await page.content()
                     self.rate_limits[domain] = time.monotonic()
-                    return content.encode('utf-8') if content else None
-                    
+                    return content.encode("utf-8") if content else None
+
             except Exception as e:
-                delay = min(2 ** attempt, 16)
+                delay = min(2**attempt, 16)
                 self.logger.warning(
                     f"Attempt {attempt + 1}/{max_retries + 1} failed for {url} "
                     f"with Playwright: {e}. Retrying in {delay}s."
@@ -510,7 +560,9 @@ class AsyncParallelWebScraper:
                 return
 
             if self.whitelisted_paths_patterns:
-                if not any(pattern.match(path) for pattern in self.whitelisted_paths_patterns):
+                if not any(
+                    pattern.match(path) for pattern in self.whitelisted_paths_patterns
+                ):
                     self.logger.debug(f"Skipping non-whitelisted path: {url}")
                     return
 
@@ -540,7 +592,7 @@ class AsyncParallelWebScraper:
 
             # Parse HTML
             try:
-                soup = BeautifulSoup(content, 'html.parser')
+                soup = BeautifulSoup(content, "html.parser")
             except Exception as e:
                 self.logger.error(f"Error parsing HTML for {url}: {e}")
                 async with self.lock:
@@ -549,8 +601,8 @@ class AsyncParallelWebScraper:
 
             # Extract links
             links = []
-            for link in soup.find_all('a'):
-                href = link.get('href')
+            for link in soup.find_all("a"):
+                href = link.get("href")
                 if href:
                     abs_link = urljoin(url, href)
                     links.append(abs_link)
@@ -561,8 +613,8 @@ class AsyncParallelWebScraper:
                     continue
 
                 # Try HTTPS version if HTTP
-                if link.startswith('http://'):
-                    https_link = link.replace('http://', 'https://')
+                if link.startswith("http://"):
+                    https_link = link.replace("http://", "https://")
                     try:
                         async with self.session.head(https_link, timeout=5):
                             link = https_link
@@ -572,9 +624,14 @@ class AsyncParallelWebScraper:
                 domain = self.get_domain_name(link)
 
                 # Enqueue for crawling if in whitelisted domains
-                if any(domain == main_domain for main_domain in self.whitelisted_domains):
+                if any(
+                    domain == main_domain for main_domain in self.whitelisted_domains
+                ):
                     async with self.lock:
-                        if link not in self.scraped_urls and link not in self.processing:
+                        if (
+                            link not in self.scraped_urls
+                            and link not in self.processing
+                        ):
                             await self.to_scrape.put((link, depth + 1))
                 else:
                     async with self.lock:
@@ -597,7 +654,9 @@ class AsyncParallelWebScraper:
             try:
                 # Get URL from queue with timeout to check cancel_event periodically
                 try:
-                    url, depth = await asyncio.wait_for(self.to_scrape.get(), timeout=1.0)
+                    url, depth = await asyncio.wait_for(
+                        self.to_scrape.get(), timeout=1.0
+                    )
                 except asyncio.TimeoutError:
                     continue
 
@@ -620,7 +679,9 @@ class AsyncParallelWebScraper:
 
         self.logger.debug(f"Worker {task_name} exited")
 
-    async def scrape_website(self, request: ScrapeRequest) -> Tuple[Set[str], Set[str]]:
+    async def scrape_website(
+        self, request: ScrapeRequest, progress_callback: callable = None
+    ) -> Tuple[Set[str], Set[str]]:
         """
         Start scraping a website from the start URL.
 
@@ -651,8 +712,9 @@ class AsyncParallelWebScraper:
         main_domain = self.get_domain_name(request.start_url)
 
         if request.whitelisted_domains:
-            self.whitelisted_domains = set(d.lower()
-                                           for d in request.whitelisted_domains)
+            self.whitelisted_domains = set(
+                d.lower() for d in request.whitelisted_domains
+            )
         else:
             self.whitelisted_domains = {main_domain}
 
@@ -675,11 +737,37 @@ class AsyncParallelWebScraper:
             task = asyncio.create_task(self.worker(), name=f"worker-{i}")
             tasks.append(task)
 
+        # Initializing progress monitor
+        monitor_task = None
+        if progress_callback:
+            monitor_task = asyncio.create_task(
+                self._progress_monitor(progress_callback, interval=5)
+            )
+
         # Wait for queue to be empty
         await self.to_scrape.join()
 
         # Signal workers to exit and wait for them
         self.cancel_event.set()
+
+        # Cancel progress monitor
+        if monitor_task:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+
+            # Send one final update to ensure 100% progress is captured
+            final_msg = (
+                f"Completed: Scraped {len(self.scraped_urls)} pages | "
+                f"External Links {len(self.external_links)}"
+            )
+            if asyncio.iscoroutinefunction(progress_callback):
+                await progress_callback(final_msg)
+            else:
+                progress_callback(final_msg)
+
         for task in tasks:
             task.cancel()
 
